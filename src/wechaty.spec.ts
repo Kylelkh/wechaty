@@ -1,9 +1,10 @@
 #!/usr/bin/env ts-node
 
 /**
- *   Wechaty - https://github.com/chatie/wechaty
+ *   Wechaty Chatbot SDK - https://github.com/wechaty/wechaty
  *
- *   @copyright 2016-2018 Huan LI <zixia@zixia.net>
+ *   @copyright 2016 Huan LI (李卓桓) <https://github.com/huan>, and
+ *                   Wechaty Contributors <https://github.com/wechaty>.
  *
  *   Licensed under the Apache License, Version 2.0 (the "License");
  *   you may not use this file except in compliance with the License.
@@ -18,55 +19,60 @@
  *   limitations under the License.
  *
  */
-// tslint:disable:no-shadowed-variable
-import * as test  from 'blue-tape'
-import * as sinon from 'sinon'
+import test  from 'blue-tape'
+import sinon from 'sinon'
 
-// import * as asyncHooks from 'async_hooks'
+import { PuppetMock } from 'wechaty-puppet-mock'
+
+import {
+  Wechaty,
+}                             from './wechaty'
 
 import {
   config,
   Contact,
-  FriendRequest,
+  Friendship,
   IoClient,
-  Message,
-  Room,
-  Wechaty,
-
   log,
-  VERSION,
-}                 from './'
+  Message,
+
+  Room,
+}                 from './mod'
 
 import {
   Puppet,
-}                 from './puppet/'
+}                     from 'wechaty-puppet'
+
+class WechatyTest extends Wechaty {
+
+  public wechatifyUserModulesTest (puppet: Puppet): void {
+    return this.wechatifyUserModules(puppet)
+  }
+
+}
 
 test('Export of the Framework', async t => {
-  t.ok(Contact        , 'should export Contact')
-  t.ok(FriendRequest  , 'should export FriendREquest')
-  t.ok(IoClient       , 'should export IoClient')
-  t.ok(Message        , 'should export Message')
-  t.ok(Puppet , 'should export Puppet')
-  t.ok(Room           , 'should export Room')
-  t.ok(Wechaty        , 'should export Wechaty')
-  t.ok(log            , 'should export log')
+  t.ok(Contact,     'should export Contact')
+  t.ok(Friendship,  'should export Friendship')
+  t.ok(IoClient,    'should export IoClient')
+  t.ok(Message,     'should export Message')
+  t.ok(Puppet,      'should export Puppet')
+  t.ok(Room,        'should export Room')
+  t.ok(Wechaty,     'should export Wechaty')
+  t.ok(log,         'should export log')
+})
 
-  const bot = Wechaty.instance()
-  t.is(bot.version(true), require('../package.json').version,
-                          'should return version as the same in package.json',
-  )
-  t.is(VERSION, require('../package.json').version,
-                  'should export version in package.json',
-  )
+test('static VERSION', async t => {
+  t.true('VERSION' in Wechaty, 'Wechaty should has a static VERSION property')
 })
 
 test('Config setting', async t => {
-  t.ok(config                         , 'should export Config')
-  t.ok(config.default.DEFAULT_PUPPET  , 'should has DEFAULT_PUPPET')
+  t.ok(config, 'should export Config')
+  // t.ok(config.default.DEFAULT_PUPPET  , 'should has DEFAULT_PUPPET')
 })
 
 test('event:start/stop', async t => {
-  const wechaty = Wechaty.instance()
+  const wechaty = new Wechaty({ puppet: 'wechaty-puppet-mock' })
 
   const startSpy = sinon.spy()
   const stopSpy  = sinon.spy()
@@ -77,6 +83,7 @@ test('event:start/stop', async t => {
   await wechaty.start()
   await wechaty.stop()
 
+  // console.log(startSpy.callCount)
   t.ok(startSpy.calledOnce, 'should get event:start once')
   t.ok(stopSpy.calledOnce,  'should get event:stop once')
 })
@@ -123,17 +130,17 @@ test('event:start/stop', async t => {
 //   console.log(m)
 // })
 
-test('on(event, Function)', async t => {
+test.skip('SKIP DEALING WITH THE LISTENER EXCEPTIONS. on(event, Function)', async t => {
   const spy     = sinon.spy()
   const wechaty = Wechaty.instance()
 
   const EXPECTED_ERROR = new Error('testing123')
   wechaty.on('message', () => { throw EXPECTED_ERROR })
-  wechaty.on('scan',    () => 42)
+  // wechaty.on('scan',    () => 42)
   wechaty.on('error',   spy)
 
   const messageFuture  = new Promise(resolve => wechaty.once('message', resolve))
-  wechaty.emit('message')
+  wechaty.emit('message', {} as any)
 
   await messageFuture
   await wechaty.stop()
@@ -143,4 +150,178 @@ test('on(event, Function)', async t => {
 
 })
 
+test.skip('SKIP DEALING WITH THE LISTENER EXCEPTIONS. test async error', async (t) => {
+
+  // Do not modify the global Wechaty instance
+  class MyWechatyTest extends Wechaty {}
+
+  const EXPECTED_ERROR = new Error('test')
+
+  const bot = new MyWechatyTest({
+    puppet: new PuppetMock(),
+  })
+
+  const asyncErrorFunction = function () {
+    return new Promise<void>((resolve, reject) => {
+      setTimeout(function () {
+        reject(EXPECTED_ERROR)
+      }, 100)
+      // tslint ask resolve must be called,
+      // so write a falsy value, so that it never called
+      if (+new Date() < 0) {
+        resolve()
+      }
+    })
+  }
+
+  bot.on('message', async () => {
+    await asyncErrorFunction()
+  })
+  bot.on('error', (e) => {
+    t.ok(e.message === EXPECTED_ERROR.message)
+  })
+
+  bot.emit('message', {} as any)
+
+  await bot.stop()
+})
+
+test('use plugin', async (t) => {
+
+  // Do not modify the gloabl Wechaty instance
+  class MyWechatyTest extends Wechaty {}
+
+  let result = ''
+
+  const myGlobalPlugin = function () {
+    return function (bot: Wechaty) {
+      bot.on('message', () => (result += 'FROM_GLOBAL_PLUGIN:'))
+    }
+  }
+
+  const myPlugin = function () {
+    return function (bot: Wechaty) {
+      bot.on('message', () => (result += 'FROM_MY_PLUGIN:'))
+    }
+  }
+
+  MyWechatyTest.use(myGlobalPlugin())
+
+  const bot = new MyWechatyTest({
+    puppet: new PuppetMock(),
+  })
+
+  bot.use(myPlugin())
+
+  bot.on('message', () => (result += 'FROM_BOT'))
+
+  bot.emit('message', {} as any)
+
+  await bot.stop()
+
+  t.ok(result === 'FROM_GLOBAL_PLUGIN:FROM_MY_PLUGIN:FROM_BOT')
+
+})
+
+test('initPuppetAccessory()', async t => {
+  const wechatyTest = new WechatyTest()
+
+  const puppet = new PuppetMock()
+  t.doesNotThrow(() => wechatyTest.wechatifyUserModulesTest(puppet), 'should not throw for the 1st time init')
+  t.throws(() => wechatyTest.wechatifyUserModulesTest(puppet),       'should throw for the 2nd time init')
+})
+
 // TODO: add test for event args
+
+test('Wechaty restart for many times', async t => {
+  const wechaty = new Wechaty({
+    puppet: new PuppetMock(),
+  })
+
+  try {
+    for (let i = 0; i < 3; i++) {
+      await wechaty.start()
+      await wechaty.stop()
+      t.pass('start/stop-ed at #' + i)
+    }
+    t.pass('Wechaty start/restart successed.')
+  } catch (e) {
+    t.fail(e)
+  }
+
+})
+
+test('@event ready', async t => {
+  const puppet = new PuppetMock()
+  const wechaty = new Wechaty({ puppet })
+
+  const sandbox = sinon.createSandbox()
+  const spy     = sandbox.spy()
+
+  wechaty.on('ready', spy)
+  t.true(spy.notCalled, 'should no ready event with new wechaty instance')
+
+  await wechaty.start()
+  t.true(spy.notCalled, 'should no ready event right start wechaty started')
+
+  puppet.emit('ready', { data: 'test' })
+  t.true(spy.calledOnce, 'should fire ready event after puppet ready')
+
+  await wechaty.stop()
+  await wechaty.start()
+  puppet.emit('ready', { data: 'test' })
+
+  t.true(spy.calledTwice, 'should fire ready event second time after stop/start wechaty')
+
+  await wechaty.stop()
+})
+
+test('ready()', async t => {
+  const puppet = new PuppetMock()
+  const wechaty = new Wechaty({ puppet })
+
+  const sandbox = sinon.createSandbox()
+
+  const spy = sandbox.spy()
+
+  wechaty.ready()
+    .then(spy)
+    .catch(e => t.fail('rejection: ' + e))
+
+  t.true(spy.notCalled, 'should not ready with new wechaty instance')
+
+  await wechaty.start()
+
+  t.true(spy.notCalled, 'should not ready after right start wechaty')
+
+  puppet.emit('ready', { data: 'test' })
+  await new Promise(resolve => setImmediate(resolve))
+  t.true(spy.calledOnce, 'should ready after puppet ready')
+
+  await wechaty.stop()
+  await wechaty.start()
+  wechaty.ready()
+    .then(spy)
+    .catch(e => t.fail('rejection: ' + e))
+
+  puppet.emit('ready', { data: 'test' })
+  await new Promise(resolve => setImmediate(resolve))
+  t.true(spy.calledTwice, 'should ready again after stop/start wechaty')
+
+  await wechaty.stop()
+})
+
+test('on/off event listener management', async t => {
+  const puppet = new PuppetMock()
+  const wechaty = new Wechaty({ puppet })
+
+  const onMessage = (_: any) => {}
+  t.equal(wechaty.listenerCount('message'), 0, 'should no listener after initializing')
+
+  wechaty.on('message', onMessage)
+  t.equal(wechaty.listenerCount('message'), 1, 'should +1 listener after on(message)')
+
+  wechaty.off('message', onMessage)
+  t.equal(wechaty.listenerCount('message'), 0, 'should -1 listener after off(message)')
+
+})

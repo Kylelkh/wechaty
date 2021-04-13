@@ -1,7 +1,8 @@
 /**
- *   Wechaty - https://github.com/chatie/wechaty
+ *   Wechaty Chatbot SDK - https://github.com/wechaty/wechaty
  *
- *   @copyright 2016-2018 Huan LI <zixia@zixia.net>
+ *   @copyright 2016 Huan LI (李卓桓) <https://github.com/huan>, and
+ *                   Wechaty Contributors <https://github.com/wechaty>.
  *
  *   Licensed under the Apache License, Version 2.0 (the "License");
  *   you may not use this file except in compliance with the License.
@@ -16,27 +17,150 @@
  *   limitations under the License.
  *
  */
-import * as path      from 'path'
+import {
+  Contact,
+  FileBox,
+  Message,
+  ScanStatus,
+  Wechaty,
+}               from '../src/mod' // from 'wechaty'
 
-/* tslint:disable:variable-name */
-import * as QrcodeTerminal  from 'qrcode-terminal'
-import finis                from 'finis'
+import { generate } from 'qrcode-terminal'
 
 /**
- * Change `import { ... } from '../'`
- * to     `import { ... } from 'wechaty'`
- * when you are runing with Docker or NPM instead of Git Source.
+ *
+ * 1. Declare your Bot!
+ *
  */
-import {
-  Wechaty,
-  log,
-}               from '../src/'
+const bot = new Wechaty({
+  name : 'ding-dong-bot',
+})
 
-const BOT_QR_CODE_IMAGE_FILE = path.join(
-  __dirname,
-  '../docs/images/bot-qr-code.png',
-)
+/**
+ *
+ * 2. Register event handlers for Bot
+ *
+ */
+bot
+  .on('logout', onLogout)
+  .on('login',  onLogin)
+  .on('scan',   onScan)
+  .on('error',  onError)
+  .on('message', onMessage)
 
+/**
+ *
+ * 3. Start the bot!
+ *
+ */
+bot.start()
+  .catch(async e => {
+    console.error('Bot start() fail:', e)
+    await bot.stop()
+    process.exit(-1)
+  })
+
+/**
+ *
+ * 4. You are all set. ;-]
+ *
+ */
+
+/**
+ *
+ * 5. Define Event Handler Functions for:
+ *  `scan`, `login`, `logout`, `error`, and `message`
+ *
+ */
+function onScan (qrcode: string, status: ScanStatus) {
+  if (status === ScanStatus.Waiting || status === ScanStatus.Timeout) {
+    generate(qrcode)
+
+    const qrcodeImageUrl = [
+      'https://wechaty.js.org/qrcode/',
+      encodeURIComponent(qrcode),
+    ].join('')
+
+    console.info('onScan: %s(%s) - %s', ScanStatus[status], status, qrcodeImageUrl)
+  } else {
+    console.info('onScan: %s(%s)', ScanStatus[status], status)
+  }
+
+  // console.info(`[${ScanStatus[status]}(${status})] ${qrcodeImageUrl}\nScan QR Code above to log in: `)
+}
+
+function onLogin (user: Contact) {
+  console.info(`${user.name()} login`)
+}
+
+function onLogout (user: Contact) {
+  console.info(`${user.name()} logged out`)
+}
+
+function onError (e: Error) {
+  console.error('Bot error:', e)
+  /*
+  if (bot.logonoff()) {
+    bot.say('Wechaty error: ' + e.message).catch(console.error)
+  }
+  */
+}
+
+/**
+ *
+ * 6. The most important handler is for:
+ *    dealing with Messages.
+ *
+ */
+async function onMessage (msg: Message) {
+  console.info(msg.toString())
+
+  if (msg.self()) {
+    console.info('Message discarded because its outgoing')
+    return
+  }
+
+  if (msg.age() > 2 * 60) {
+    console.info('Message discarded because its TOO OLD(than 2 minutes)')
+    return
+  }
+
+  if (msg.type() !== bot.Message.Type.Text
+    || !/^(ding|ping|bing|code)$/i.test(msg.text())
+  ) {
+    console.info('Message discarded because it does not match ding/ping/bing/code')
+    return
+  }
+
+  /**
+   * 1. reply 'dong'
+   */
+  await msg.say('dong')
+  console.info('REPLY: dong')
+
+  /**
+   * 2. reply image(qrcode image)
+   */
+  const fileBox = FileBox.fromUrl('https://wechaty.github.io/wechaty/images/bot-qr-code.png')
+
+  await msg.say(fileBox)
+  console.info('REPLY: %s', fileBox.toString())
+
+  /**
+   * 3. reply 'scan now!'
+   */
+  await msg.say([
+    'Join Wechaty Developers Community\n\n',
+    'Scan now, because other Wechaty developers want to talk with you too!\n\n',
+    '(secret code: wechaty)',
+  ].join(''))
+}
+
+/**
+ *
+ * 7. Output the Welcome Message
+ *
+ */
 const welcome = `
 | __        __        _           _
 | \\ \\      / /__  ___| |__   __ _| |_ _   _
@@ -46,7 +170,8 @@ const welcome = `
 |                                     |___/
 
 =============== Powered by Wechaty ===============
--------- https://github.com/chatie/wechaty --------
+-------- https://github.com/wechaty/wechaty --------
+          Version: ${bot.version(true)}
 
 I'm a bot, my superpower is talk in Wechat.
 
@@ -59,145 +184,4 @@ upgrade me to more superpowers!
 Please wait... I'm trying to login in...
 
 `
-
-console.log(welcome)
-const bot = Wechaty.instance()
-
-bot
-.on('logout'	, user => log.info('Bot', `${user.name()} logouted`))
-.on('login'	  , user => {
-  log.info('Bot', `${user.name()} login`)
-  bot.say('Wechaty login').catch(console.error)
-})
-.on('scan', (url, code) => {
-  if (!/201|200/.test(String(code))) {
-    const loginUrl = url.replace(/\/qrcode\//, '/l/')
-    QrcodeTerminal.generate(loginUrl)
-  }
-  console.log(`${url}\n[${code}] Scan QR Code above url to log in: `)
-})
-.on('message', async m => {
-  try {
-    const room = m.room()
-    console.log(
-      (room ? `${room}` : '')
-      + `${m.from()}:${m}`,
-    )
-
-    if (/^(ding|ping|bing|code)$/i.test(m.text()) && !m.self()) {
-      /**
-       * 1. reply 'dong'
-       */
-      log.info('Bot', 'REPLY: dong')
-      m.say('dong')
-
-      const joinWechaty =  `Join Wechaty Developers' Community\n\n` +
-                            `Wechaty is used in many ChatBot projects by hundreds of developers.\n\n` +
-                            `If you want to talk with other developers, just scan the following QR Code in WeChat with secret code: wechaty,\n\n` +
-                            `you can join our Wechaty Developers' Home at once`
-      await m.say(joinWechaty)
-
-      /**
-       * 2. reply qrcode image
-       */
-      const imageMessage = new bot.Message(BOT_QR_CODE_IMAGE_FILE)
-      log.info('Bot', 'REPLY: %s', imageMessage)
-      await m.say(imageMessage)
-
-      /**
-       * 3. reply 'scan now!'
-       */
-      await m.say('Scan now, because other Wechaty developers want to talk with you too!\n\n(secret code: wechaty)')
-
-    }
-  } catch (e) {
-    log.error('Bot', 'on(message) exception: %s' , e)
-    console.error(e)
-  }
-})
-
-bot.on('error', async e => {
-  log.error('Bot', 'error: %s', e)
-  if (bot.logonoff()) {
-    await bot.say('Wechaty error: ' + e.message).catch(console.error)
-  }
-  // await bot.stop()
-})
-
-let killChrome: NodeJS.SignalsListener
-
-bot.start()
-.then(() => {
-  const listenerList = process.listeners('SIGINT')
-  for (const listener of listenerList) {
-    if (listener.name === 'killChrome') {
-      process.removeListener('SIGINT', listener)
-      killChrome = listener
-    }
-  }
-})
-.catch(e => {
-  log.error('Bot', 'start() fail: %s', e)
-  bot.stop()
-  process.exit(-1)
-})
-
-let quiting = false
-finis((code, signal) => {
-  log.info('Bot', 'finis(%s, %s)', code, signal)
-
-  if (!bot.logonoff()) {
-    log.info('Bot', 'finis() bot had been already stopped')
-    doExit(code)
-  }
-
-  if (quiting) {
-    log.warn('Bot', 'finis() already quiting... return and wait...')
-    return
-  }
-
-  quiting = true
-  let done = false
-  // let checkNum = 0
-
-  const exitMsg = `Wechaty will exit ${code} because of ${signal} `
-
-  log.info('Bot', 'finis() broadcast quiting message for bot')
-  bot.say(exitMsg)
-      // .then(() => bot.stop())
-      .catch(e => log.error('Bot', 'finis() catch rejection: %s', e))
-      .then(() => done = true)
-
-  setImmediate(checkForExit)
-
-  function checkForExit() {
-    // if (checkNum++ % 100 === 0) {
-    log.info('Bot', 'finis() checkForExit() checking done: %s', done)
-    // }
-    if (done) {
-      log.info('Bot', 'finis() checkForExit() done!')
-      setTimeout(() => doExit(code), 1000)  // delay 1 second
-      return
-    }
-    // death loop to wait for `done`
-    // process.nextTick(checkForExit)
-    // setImmediate(checkForExit)
-    setTimeout(checkForExit, 100)
-  }
-})
-
-function doExit(code: number): void {
-  log.info('Bot', 'doExit(%d)', code)
-  if (killChrome) {
-    killChrome('SIGINT')
-  }
-  process.exit(code)
-}
-
-// process.on('SIGINT', function() {
-//   console.log('Nice SIGINT-handler')
-//   const listeners = process.listeners('SIGINT')
-//   for (let i = 0; i < listeners.length; i++) {
-//       console.log(listeners[i].toString())
-//   }
-// })
+console.info(welcome)

@@ -1,9 +1,10 @@
 #!/usr/bin/env ts-node
 
 /**
- *   Wechaty - https://github.com/chatie/wechaty
+ *   Wechaty Chatbot SDK - https://github.com/wechaty/wechaty
  *
- *   @copyright 2016-2018 Huan LI <zixia@zixia.net>
+ *   @copyright 2016 Huan LI (李卓桓) <https://github.com/huan>, and
+ *                   Wechaty Contributors <https://github.com/wechaty>.
  *
  *   Licensed under the Apache License, Version 2.0 (the "License");
  *   you may not use this file except in compliance with the License.
@@ -18,10 +19,7 @@
  *   limitations under the License.
  *
  */
-// tslint:disable:no-shadowed-variable
-import * as test  from 'blue-tape'
-// import * as sinon from 'sinon'
-// const sinonTest   = require('sinon-test')(sinon)
+import test  from 'blue-tape'
 
 // import { log }  from '../src/config'
 
@@ -32,7 +30,7 @@ test('Node.js function params destructuring behaviour test', async t => {
   const DEFAULT_S = 't'
 
   const paramSpy = spy()
-  function paramTest({
+  function paramTest ({
     n = DEFAULT_N,
     s = DEFAULT_S,
   } = {}) {
@@ -44,10 +42,10 @@ test('Node.js function params destructuring behaviour test', async t => {
   t.deepEqual(paramSpy.args[0], [DEFAULT_N, DEFAULT_S], 'should be equal to default args')
 
   paramSpy.resetHistory()
-  paramTest({n: 42})
+  paramTest({ n: 42 })
   t.deepEqual(paramSpy.args[0], [42, DEFAULT_S], 'should be equal to default s args')
 
   paramSpy.resetHistory()
-  paramTest({s: 'life'})
+  paramTest({ s: 'life' })
   t.deepEqual(paramSpy.args[0], [DEFAULT_N, 'life'], 'should be equal to default n args')
 })

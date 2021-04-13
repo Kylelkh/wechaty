@@ -1,7 +1,8 @@
 /**
- *   Wechaty - https://github.com/chatie/wechaty
+ *   Wechaty Chatbot SDK - https://github.com/wechaty/wechaty
  *
- *   @copyright 2016-2018 Huan LI <zixia@zixia.net>
+ *   @copyright 2016 Huan LI (李卓桓) <https://github.com/huan>, and
+ *                   Wechaty Contributors <https://github.com/wechaty>.
  *
  *   Licensed under the Apache License, Version 2.0 (the "License");
  *   you may not use this file except in compliance with the License.
@@ -15,129 +16,193 @@
  *   See the License for the specific language governing permissions and
  *   limitations under the License.
  *
- *  @ignore
  */
-import * as cuid    from 'cuid'
-import * as os      from 'os'
-import * as semver  from 'semver'
+import cuid             from 'cuid'
+import os               from 'os'
+
+import { StateSwitch }      from 'state-switch'
+import { instanceToClass }  from 'clone-class'
+import {
+  Puppet,
+
+  MemoryCard,
+
+  PUPPET_EVENT_DICT,
+  PuppetEventName,
+  PuppetOptions,
+  PayloadType,
+}                       from 'wechaty-puppet'
 
 import {
-  Constructor,
-  cloneClass,
-  instanceToClass,
-}                   from 'clone-class'
-import {
-  callerResolve,
-  hotImport,
-}                   from 'hot-import'
-import StateSwitch  from 'state-switch'
+  FileBox,
+  Raven,
+
+  config,
+  log,
+}                       from './config'
 
 import {
   VERSION,
-  config,
-  log,
-  Raven,
-  Sayable,
-}                       from './config'
-import Profile          from './profile'
-import PuppetAccessory  from './puppet-accessory'
+  GIT_COMMIT_HASH,
+}                       from './version'
+
 import {
-  PUPPET_DICT,
-  PuppetName,
+  Sayable,
+}                       from './types'
+
+import {
+  Io,
+}                       from './io'
+import {
+  PuppetModuleName,
 }                       from './puppet-config'
+import {
+  PuppetManager,
+}                       from './puppet-manager'
 
 import {
   Contact,
-  FriendRequest,
+  ContactSelf,
+  Friendship,
+  Image,
   Message,
-  Puppet,
+  MiniProgram,
   Room,
-}                       from './puppet/'
+  RoomInvitation,
+  Tag,
+  UrlLink,
 
-export const WECHAT_EVENT_DICT = {
-  friend      : 'tbw',
-  login       : 'tbw',
-  logout      : 'tbw',
-  message     : 'tbw',
-  'room-join' : 'tbw',
-  'room-leave': 'tbw',
-  'room-topic': 'tbw',
-  scan        : 'tbw',
-}
+  wechatifyContact,
+  wechatifyContactSelf,
+  wechatifyFriendship,
+  wechatifyImage,
+  wechatifyMessage,
+  wechatifyMiniProgram,
+  wechatifyRoom,
+  wechatifyRoomInvitation,
+  wechatifyTag,
+  wechatifyUrlLink,
+}                       from './user/mod'
 
-export const WECHATY_EVENT_DICT = {
-  ...WECHAT_EVENT_DICT,
-  error     : 'tbw',
-  heartbeat : 'tbw',
-  start     : 'tbw',
-  stop      : 'tbw',
-}
+import { timestampToDate } from './helper-functions/pure/timestamp-to-date'
 
-export type WechatEventName   = keyof typeof WECHAT_EVENT_DICT
-export type WechatyEventName  = keyof typeof WECHATY_EVENT_DICT
+import {
+  WechatyEventEmitter,
+  WechatyEventName,
+}                             from './events/wechaty-events'
+
+import {
+  WechatyPlugin,
+  WechatyPluginUninstaller,
+  isWechatyPluginUninstaller,
+}                             from './plugin'
 
 export interface WechatyOptions {
-  puppet?:  PuppetName | Puppet,
-  profile?: string | null,
+  memory?        : MemoryCard,
+  name?          : string,                    // Wechaty Name
+
+  puppet?        : PuppetModuleName | Puppet, // Puppet name or instance
+  puppetOptions? : PuppetOptions,             // Puppet TOKEN
+  ioToken?       : string,                    // Io TOKEN
 }
+
+const PUPPET_MEMORY_NAME = 'puppet'
 
 /**
  * Main bot class.
  *
- * [The World's Shortest ChatBot Code: 6 lines of JavaScript]{@link #wechatyinstance}
+ * A `Bot` is a WeChat client depends on which puppet you use.
+ * It may equals
+ * - web-WeChat, when you use: [puppet-puppeteer](https://github.com/wechaty/wechaty-puppet-puppeteer)/[puppet-wechat4u](https://github.com/wechaty/wechaty-puppet-wechat4u)
+ * - ipad-WeChat, when you use: [puppet-padchat](https://github.com/wechaty/wechaty-puppet-padchat)
+ * - ios-WeChat, when you use: puppet-ioscat
  *
- * [Wechaty Starter Project]{@link https://github.com/lijiarui/wechaty-getting-started}
- * @example
- * import { Wechaty } from 'wechaty'
+ * See more:
+ * - [What is a Puppet in Wechaty](https://github.com/wechaty/wechaty-getting-started/wiki/FAQ-EN#31-what-is-a-puppet-in-wechaty)
  *
+ * > If you want to know how to send message, see [Message](#Message) <br>
+ * > If you want to know how to get contact, see [Contact](#Contact)
+ *
+ * @example <caption>The World's Shortest ChatBot Code: 6 lines of JavaScript</caption>
+ * const { Wechaty } = require('wechaty')
+ * const bot = new Wechaty()
+ * bot.on('scan',    (qrCode, status) => console.log('https://wechaty.js.org/qrcode/' + encodeURIComponent(qrcode)))
+ * bot.on('login',   user => console.log(`User ${user} logged in`))
+ * bot.on('message', message => console.log(`Message: ${message}`))
+ * bot.start()
  */
-export class Wechaty extends PuppetAccessory implements Sayable {
+class Wechaty extends WechatyEventEmitter implements Sayable {
+
+  public static readonly VERSION = VERSION
+
+  public  readonly state      : StateSwitch
+  private readonly readyState : StateSwitch
+  public  readonly wechaty    : Wechaty
+
   /**
    * singleton globalInstance
-   * @private
+   * @ignore
    */
   private static globalInstance: Wechaty
 
-  private profile: Profile
+  private static globalPluginList: WechatyPlugin[] = []
 
-  /**
-   * the state
-   * @private
-   */
-  private state = new StateSwitch('Wechaty', log)
+  private pluginUninstallerList: WechatyPluginUninstaller[]
+
+  private memory?: MemoryCard
+
+  private lifeTimer? : NodeJS.Timer
+  private io?        : Io
+
+  public puppet!: Puppet
 
   /**
    * the cuid
-   * @private
+   * @ignore
    */
-  public readonly cuid:        string
+  public readonly id : string
 
-  // tslint:disable-next-line:variable-name
-  public Contact        : typeof Contact        & Constructor<Contact>
-  // tslint:disable-next-line:variable-name
-  public FriendRequest  : typeof FriendRequest  & Constructor<FriendRequest>
-  // tslint:disable-next-line:variable-name
-  public Message        : typeof Message        & Constructor<Message>
-  // tslint:disable-next-line:variable-name
-  public Room           : typeof Room           & Constructor<Room>
+  protected wechatifiedContact?        : typeof Contact
+  protected wechatifiedContactSelf?    : typeof ContactSelf
+  protected wechatifiedFriendship?     : typeof Friendship
+  protected wechatifiedImage?          : typeof Image
+  protected wechatifiedMessage?        : typeof Message
+  protected wechatifiedMiniProgram?    : typeof MiniProgram
+  protected wechatifiedRoom?           : typeof Room
+  protected wechatifiedRoomInvitation? : typeof RoomInvitation
+  protected wechatifiedTag?            : typeof Tag
+  protected wechatifiedUrlLink?        : typeof UrlLink
+
+  public get Contact ()        : typeof Contact         { return guardWechatify(this.wechatifiedContact)        }
+  public get ContactSelf ()    : typeof ContactSelf     { return guardWechatify(this.wechatifiedContactSelf)    }
+  public get Friendship ()     : typeof Friendship      { return guardWechatify(this.wechatifiedFriendship)     }
+  public get Image ()          : typeof Image           { return guardWechatify(this.wechatifiedImage)          }
+  public get Message ()        : typeof Message         { return guardWechatify(this.wechatifiedMessage)        }
+  public get MiniProgram ()    : typeof MiniProgram     { return guardWechatify(this.wechatifiedMiniProgram)    }
+  public get Room ()           : typeof Room            { return guardWechatify(this.wechatifiedRoom)           }
+  public get RoomInvitation () : typeof RoomInvitation  { return guardWechatify(this.wechatifiedRoomInvitation) }
+  public get Tag ()            : typeof Tag             { return guardWechatify(this.wechatifiedTag)            }
+  public get UrlLink ()        : typeof UrlLink         { return guardWechatify(this.wechatifiedUrlLink)        }
 
   /**
-   * get the singleton instance of Wechaty
+   * Get the global instance of Wechaty
+   *
+   * @param {WechatyOptions} [options={}]
    *
    * @example <caption>The World's Shortest ChatBot Code: 6 lines of JavaScript</caption>
    * const { Wechaty } = require('wechaty')
    *
-   * Wechaty.instance() // Singleton
-   * .on('scan', (url, code) => console.log(`Scan QR Code to login: ${code}\n${url}`))
-   * .on('login',       user => console.log(`User ${user} logined`))
+   * Wechaty.instance() // Global instance
+   * .on('scan', (url, status) => console.log(`Scan QR Code to login: ${status}\n${url}`))
+   * .on('login',       user => console.log(`User ${user} logged in`))
    * .on('message',  message => console.log(`Message: ${message}`))
-   * .init()
+   * .start()
    */
-  public static instance(
+  public static instance (
     options?: WechatyOptions,
   ) {
     if (options && this.globalInstance) {
-      throw new Error('there has already a instance. no params will be allowed any more')
+      throw new Error('instance can be only initialized once by options!')
     }
     if (!this.globalInstance) {
       this.globalInstance = new Wechaty(options)
@@ -146,298 +211,433 @@ export class Wechaty extends PuppetAccessory implements Sayable {
   }
 
   /**
-   * @public
+   * @param   {WechatyPlugin[]} plugins      - The plugins you want to use
+   *
+   * @return  {Wechaty}                      - this for chaining,
+   *
+   * @desc
+   * For wechaty ecosystem, allow user to define a 3rd party plugin for the all wechaty instances
+   *
+   * @example
+   * // Report all chat message to my server.
+   *
+   * function WechatyReportPlugin(options: { url: string }) {
+   *   return function (this: Wechaty) {
+   *     this.on('message', message => http.post(options.url, { data: message }))
+   *   }
+   * }
+   *
+   * bot.use(WechatyReportPlugin({ url: 'http://somewhere.to.report.your.data.com' })
    */
-  constructor(
+  public static use (
+    ...plugins:  (WechatyPlugin | WechatyPlugin[])[]
+  ) {
+    const pluginList = plugins.flat()
+    this.globalPluginList = this.globalPluginList.concat(pluginList)
+  }
+
+  /**
+   * The term [Puppet](https://github.com/wechaty/wechaty/wiki/Puppet) in Wechaty is an Abstract Class for implementing protocol plugins.
+   * The plugins are the component that helps Wechaty to control the WeChat(that's the reason we call it puppet).
+   * The plugins are named XXXPuppet, for example:
+   * - [PuppetPuppeteer](https://github.com/wechaty/wechaty-puppet-puppeteer):
+   * - [PuppetPadchat](https://github.com/wechaty/wechaty-puppet-padchat)
+   *
+   * @typedef    PuppetModuleName
+   * @property   {string}  PUPPET_DEFAULT
+   * The default puppet.
+   * @property   {string}  wechaty-puppet-wechat4u
+   * The default puppet, using the [wechat4u](https://github.com/nodeWechat/wechat4u) to control the [WeChat Web API](https://wx.qq.com/) via a chrome browser.
+   * @property   {string}  wechaty-puppet-padchat
+   * - Using the WebSocket protocol to connect with a Protocol Server for controlling the iPad WeChat program.
+   * @property   {string}  wechaty-puppet-puppeteer
+   * - Using the [google puppeteer](https://github.com/GoogleChrome/puppeteer) to control the [WeChat Web API](https://wx.qq.com/) via a chrome browser.
+   * @property   {string}  wechaty-puppet-mock
+   * - Using the mock data to mock wechat operation, just for test.
+   */
+
+  /**
+   * The option parameter to create a wechaty instance
+   *
+   * @typedef    WechatyOptions
+   * @property   {string}                 name            -Wechaty Name. </br>
+   *          When you set this: </br>
+   *          `new Wechaty({name: 'wechaty-name'}) ` </br>
+   *          it will generate a file called `wechaty-name.memory-card.json`. </br>
+   *          This file stores the login information for bot. </br>
+   *          If the file is valid, the bot can auto login so you don't need to scan the qrCode to login again. </br>
+   *          Also, you can set the environment variable for `WECHATY_NAME` to set this value when you start. </br>
+   *          eg:  `WECHATY_NAME="your-cute-bot-name" node bot.js`
+   * @property   {PuppetModuleName | Puppet}    puppet             -Puppet name or instance
+   * @property   {Partial<PuppetOptions>} puppetOptions      -Puppet TOKEN
+   * @property   {string}                 ioToken            -Io TOKEN
+   */
+
+  /**
+   * Creates an instance of Wechaty.
+   * @param {WechatyOptions} [options={}]
+   *
+   */
+  constructor (
     private options: WechatyOptions = {},
   ) {
     super()
-    log.verbose('Wechaty', 'contructor()')
+    log.verbose('Wechaty', 'constructor()')
 
-    options.puppet  = options.puppet || config.puppet
+    this.memory = this.options.memory
 
-    options.profile = options.profile === null
-                      ? null
-                      : (options.profile || config.default.DEFAULT_PROFILE)
+    this.id = cuid()
 
-    this.profile = new Profile(options.profile)
+    this.state      = new StateSwitch('Wechaty', { log })
+    this.readyState = new StateSwitch('WechatyReady', { log })
 
-    this.cuid = cuid()
+    this.wechaty = this
+
+    /**
+     * Huan(202008):
+     *
+     * Set max listeners to 1K, so that we can add lots of listeners without the warning message.
+     * The listeners might be one of the following functionilities:
+     *  1. Plugins
+     *  2. Redux Observables
+     *  3. etc...
+     */
+    super.setMaxListeners(1024)
+
+    this.pluginUninstallerList = []
+    this.installGlobalPlugin()
   }
 
   /**
-   * @private
+   * @ignore
    */
-  public toString() { return `Wechaty<${this.options.puppet}, ${this.profile.name}>`}
-
-  /**
-   * @private
-   */
-  public static version(forceNpm = false): string {
-    if (!forceNpm) {
-      const revision = config.gitRevision()
-      if (revision) {
-        return `#git[${revision}]`
-      }
+  public toString () {
+    if (!this.options) {
+      return this.constructor.name
     }
-    return VERSION
+
+    return [
+      'Wechaty#',
+      this.id,
+      `<${(this.options && this.options.puppet) || ''}>`,
+      `(${(this.memory && this.memory.name) || ''})`,
+    ].join('')
   }
 
- /**
-  * Return version of Wechaty
-  *
-  * @param {boolean} [forceNpm=false]  - if set to true, will only return the version in package.json.
-  *                                      otherwise will return git commit hash if .git exists.
-  * @returns {string}                  - the version number
-  * @example
-  * console.log(Wechaty.instance().version())       // return '#git[af39df]'
-  * console.log(Wechaty.instance().version(true))   // return '0.7.9'
-  */
-  public version(forceNpm = false): string {
-    return Wechaty.version(forceNpm)
+  /**
+   * Wechaty bot name set by `options.name`
+   * default: `wechaty`
+   */
+  public name () {
+    return this.options.name || 'wechaty'
   }
 
-  public on(event: 'error'      , listener: string | ((this: Wechaty, error: Error) => void))                                                 : this
-  public on(event: 'friend'     , listener: string | ((this: Wechaty, friend: Contact, request?: FriendRequest) => void))                     : this
-  public on(event: 'heartbeat'  , listener: string | ((this: Wechaty, data: any) => void))                                                    : this
-  public on(event: 'logout'     , listener: string | ((this: Wechaty, user: Contact) => void))                                                : this
-  public on(event: 'login'      , listener: string | ((this: Wechaty, user: Contact) => void))                                                : this
-  public on(event: 'message'    , listener: string | ((this: Wechaty, message: Message) => void))                                             : this
-  public on(event: 'room-join'  , listener: string | ((this: Wechaty, room: Room, inviteeList: Contact[],  inviter: Contact) => void))        : this
-  public on(event: 'room-leave' , listener: string | ((this: Wechaty, room: Room, leaverList: Contact[], remover?: Contact) => void))         : this
-  public on(event: 'room-topic' , listener: string | ((this: Wechaty, room: Room, topic: string, oldTopic: string, changer: Contact) => void)): this
-  public on(event: 'scan'       , listener: string | ((this: Wechaty, url: string,  code: number) => void))                                   : this
-  public on(event: 'start'      , listener: string | ((this: Wechaty) => void))                                                               : this
-  public on(event: 'stop'       , listener: string | ((this: Wechaty) => void))                                                               : this
-  // guard for the above event: make sure it includes all the possible values
-  public on(event: never,         listener: any): this
+  public on (event: WechatyEventName, listener: (...args: any[]) => any): this {
+    log.verbose('Wechaty', 'on(%s, listener) registering... listenerCount: %s',
+      event,
+      this.listenerCount(event),
+    )
+
+    return super.on(event, listener)
+  }
 
   /**
-   * @desc       Wechaty Class Event Type
-   * @typedef    WechatyEventName
-   * @property   {string}  error      - When the bot get error, there will be a Wechaty error event fired.
-   * @property   {string}  login      - After the bot login full successful, the event login will be emitted, with a Contact of current logined user.
-   * @property   {string}  logout     - Logout will be emitted when bot detected log out, with a Contact of the current login user.
-   * @property   {string}  heartbeat  - Get bot's heartbeat.
-   * @property   {string}  friend     - When someone sends you a friend request, there will be a Wechaty friend event fired.
-   * @property   {string}  message    - Emit when there's a new message.
-   * @property   {string}  room-join  - Emit when anyone join any room.
-   * @property   {string}  room-topic - Get topic event, emitted when someone change room topic.
-   * @property   {string}  room-leave - Emit when anyone leave the room.<br>
-   *                                    If someone leaves the room by themselves, wechat will not notice other people in the room, so the bot will never get the "leave" event.
-   * @property   {string}  scan       - A scan event will be emitted when the bot needs to show you a QR Code for scanning.
+   * @param   {WechatyPlugin[]} plugins      - The plugins you want to use
+   *
+   * @return  {Wechaty}                      - this for chaining,
+   *
+   * @desc
+   * For wechaty ecosystem, allow user to define a 3rd party plugin for the current wechaty instance.
+   *
+   * @example
+   * // The same usage with Wechaty.use().
+   *
    */
+  public use (...plugins: (WechatyPlugin | WechatyPlugin[])[]) {
+    const pluginList = plugins.flat() as WechatyPlugin[]
+    const uninstallerList = pluginList
+      .map(plugin => plugin(this))
+      .filter(isWechatyPluginUninstaller)
 
-  /**
-   * @desc       Wechaty Class Event Function
-   * @typedef    WechatyEventFunction
-   * @property   {Function} error           -(this: Wechaty, error: Error) => void callback function
-   * @property   {Function} login           -(this: Wechaty, user: Contact)=> void
-   * @property   {Function} logout          -(this: Wechaty, user: Contact) => void
-   * @property   {Function} scan            -(this: Wechaty, url: string, code: number) => void <br>
-   * <ol>
-   * <li>URL: {String} the QR code image URL</li>
-   * <li>code: {Number} the scan status code. some known status of the code list here is:</li>
-   * </ol>
-   * <ul>
-   * <li>0 initial_</li>
-   * <li>200 login confirmed</li>
-   * <li>201 scaned, wait for confirm</li>
-   * <li>408 waits for scan</li>
-   * </ul>
-   * @property   {Function} heartbeat       -(this: Wechaty, data: any) => void
-   * @property   {Function} friend          -(this: Wechaty, friend: Contact, request?: FriendRequest) => void
-   * @property   {Function} message         -(this: Wechaty, message: Message) => void
-   * @property   {Function} room-join       -(this: Wechaty, room: Room, inviteeList: Contact[],  inviter: Contact) => void
-   * @property   {Function} room-topic      -(this: Wechaty, room: Room, topic: string, oldTopic: string, changer: Contact) => void
-   * @property   {Function} room-leave      -(this: Wechaty, room: Room, leaverList: Contact[]) => void
-   */
-
-  /**
-   * @listens Wechaty
-   * @param   {WechatyEventName}      event      - Emit WechatyEvent
-   * @param   {WechatyEventFunction}  listener   - Depends on the WechatyEvent
-   * @return  {Wechaty}                          - this for chain
-   *
-   * More Example Gist: [Examples/Friend-Bot]{@link https://github.com/Chatie/wechaty/blob/master/examples/friend-bot.ts}
-   *
-   * @example <caption>Event:scan </caption>
-   * wechaty.on('scan', (url: string, code: number) => {
-   *   console.log(`[${code}] Scan ${url} to login.` )
-   * })
-   *
-   * @example <caption>Event:login </caption>
-   * bot.on('login', (user: Contact) => {
-   *   console.log(`user ${user} login`)
-   * })
-   *
-   * @example <caption>Event:logout </caption>
-   * bot.on('logout', (user: Contact) => {
-   *   console.log(`user ${user} logout`)
-   * })
-   *
-   * @example <caption>Event:message </caption>
-   * wechaty.on('message', (message: Message) => {
-   *   console.log(`message ${message} received`)
-   * })
-   *
-   * @example <caption>Event:friend </caption>
-   * bot.on('friend', (contact: Contact, request: FriendRequest) => {
-   *   if(request){ // 1. request to be friend from new contact
-   *     let result = await request.accept()
-   *       if(result){
-   *         console.log(`Request from ${contact.name()} is accept succesfully!`)
-   *       } else{
-   *         console.log(`Request from ${contact.name()} failed to accept!`)
-   *       }
-   * 	  } else { // 2. confirm friend ship
-   *       console.log(`new friendship confirmed with ${contact.name()}`)
-   *    }
-   *  })
-   *
-   * @example <caption>Event:room-join </caption>
-   * bot.on('room-join', (room: Room, inviteeList: Contact[], inviter: Contact) => {
-   *   const nameList = inviteeList.map(c => c.name()).join(',')
-   *   console.log(`Room ${room.topic()} got new member ${nameList}, invited by ${inviter}`)
-   * })
-   *
-   * @example <caption>Event:room-leave </caption>
-   * bot.on('room-leave', (room: Room, leaverList: Contact[]) => {
-   *   const nameList = leaverList.map(c => c.name()).join(',')
-   *   console.log(`Room ${room.topic()} lost member ${nameList}`)
-   * })
-   *
-   * @example <caption>Event:room-topic </caption>
-   * bot.on('room-topic', (room: Room, topic: string, oldTopic: string, changer: Contact) => {
-   *   console.log(`Room ${room.topic()} topic changed from ${oldTopic} to ${topic} by ${changer.name()}`)
-   * })
-   */
-  public on(event: WechatyEventName, listener: string | ((...args: any[]) => any)): this {
-    log.verbose('Wechaty', 'on(%s, %s) registered',
-                            event,
-                            typeof listener === 'string'
-                              ? listener
-                              : typeof listener,
-                )
-
-    if (typeof listener === 'function') {
-      this.onFunction(event, listener)
-    } else {
-      this.onModulePath(event, listener)
-    }
+    this.pluginUninstallerList.push(
+      ...uninstallerList,
+    )
     return this
   }
 
-  private onModulePath(event: WechatyEventName, modulePath: string): void {
-    const absoluteFilename = callerResolve(modulePath, __filename)
-    log.verbose('Wechaty', 'onModulePath() hotImpor(%s)', absoluteFilename)
-    hotImport(absoluteFilename)
-      .then((func: Function) => super.on(event, (...args: any[]) => {
-        try {
-          func.apply(this, args)
-        } catch (e) {
-          log.error('Wechaty', 'onModulePath(%s, %s) listener exception: %s',
-                                event, modulePath, e)
-          this.emit('error', e)
-        }
-      }))
-      .catch(e => {
-        log.error('Wechaty', 'onModulePath(%s, %s) hotImport() exception: %s',
-                              event, modulePath, e)
-        this.emit('error', e)
-      })
+  private installGlobalPlugin () {
+
+    const uninstallerList = instanceToClass(this, Wechaty)
+      .globalPluginList
+      .map(plugin => plugin(this))
+      .filter(isWechatyPluginUninstaller)
+
+    this.pluginUninstallerList.push(
+      ...uninstallerList,
+    )
   }
 
-  private onFunction(event: WechatyEventName, listener: Function): void {
-    log.verbose('Wechaty', 'onFunction(%s)', event)
+  private async initPuppet (): Promise<void> {
+    log.verbose('Wechaty', 'initPuppet() %s', this.options.puppet || '')
 
-    super.on(event, (...args: any[]) => {
-      try {
-        listener.apply(this, args)
-      } catch (e) {
-        log.error('Wechaty', 'onFunction(%s) listener exception: %s', event, e)
-        this.emit('error', e)
-      }
+    const initialized = !!this.puppet
+
+    if (initialized) {
+      log.verbose('Wechaty', 'initPuppet(%s) had already been initialized, no need to init twice', this.options.puppet)
+      return
+    }
+
+    if (!this.memory) {
+      throw new Error('no memory')
+    }
+
+    const puppet       = this.options.puppet || config.systemPuppetName()
+    const puppetMemory = this.memory.multiplex(PUPPET_MEMORY_NAME)
+
+    const puppetInstance = await PuppetManager.resolve({
+      puppet,
+      puppetOptions : this.options.puppetOptions,
+      // wechaty       : this,
     })
+
+    /**
+     * Plug the Memory Card to Puppet
+     */
+    puppetInstance.setMemory(puppetMemory)
+
+    this.initPuppetEventBridge(puppetInstance)
+    this.wechatifyUserModules(puppetInstance)
+
+    /**
+      * Private Event
+      *  emit puppet when set
+      *
+      * Huan(202005)
+      */
+    ;(this.emit as any)('puppet', puppetInstance)
   }
 
-  /**
-   * @private
-   */
-  public initPuppet(): void {
-    log.verbose('Wechaty', 'initPuppet()')
-    let puppet: Puppet
+  protected initPuppetEventBridge (puppet: Puppet) {
+    log.verbose('Wechaty', 'initPuppetEventBridge(%s)', puppet)
 
-    /**
-     * 1. Init the Puppet
-     */
-    if (typeof this.options.puppet === 'string') {
-      puppet = new PUPPET_DICT[this.options.puppet]({
-        profile:  this.profile,
-        wechaty:  this,
-      })
-    } else if (this.options.puppet instanceof Puppet) {
-      puppet = this.options.puppet
-    } else {
-      throw new Error('unsupported options.puppet!')
+    const eventNameList: PuppetEventName[] = Object.keys(PUPPET_EVENT_DICT) as PuppetEventName[]
+    for (const eventName of eventNameList) {
+      log.verbose('Wechaty',
+        'initPuppetEventBridge() puppet.on(%s) (listenerCount:%s) registering...',
+        eventName,
+        puppet.listenerCount(eventName),
+      )
+
+      switch (eventName) {
+        case 'dong':
+          puppet.on('dong', payload => {
+            this.emit('dong', payload.data)
+          })
+          break
+
+        case 'error':
+          puppet.on('error', payload => {
+            this.emit('error', new Error(payload.data))
+          })
+          break
+
+        case 'heartbeat':
+          puppet.on('heartbeat', payload => {
+            /**
+             * Use `watchdog` event from Puppet to `heartbeat` Wechaty.
+             */
+            // TODO: use a throttle queue to prevent beat too fast.
+            this.emit('heartbeat', payload.data)
+          })
+          break
+
+        case 'friendship':
+          puppet.on('friendship', async payload => {
+            const friendship = this.Friendship.load(payload.friendshipId)
+            await friendship.ready()
+            this.emit('friendship', friendship)
+            friendship.contact().emit('friendship', friendship)
+          })
+          break
+
+        case 'login':
+          puppet.on('login', async payload => {
+            const contact = this.ContactSelf.load(payload.contactId)
+            await contact.ready()
+            this.emit('login', contact)
+          })
+          break
+
+        case 'logout':
+          puppet.on('logout', async payload => {
+            const contact = this.ContactSelf.load(payload.contactId)
+            await contact.ready()
+            this.emit('logout', contact, payload.data)
+          })
+          break
+
+        case 'message':
+          puppet.on('message', async payload => {
+            const msg = this.Message.load(payload.messageId)
+            await msg.ready()
+            this.emit('message', msg)
+
+            const room = msg.room()
+            if (room) {
+              room.emit('message', msg)
+            } else {
+              this.userSelf().emit('message', msg)
+            }
+          })
+          break
+
+        case 'ready':
+          puppet.on('ready', () => {
+            log.silly('Wechaty', 'initPuppetEventBridge() puppet.on(ready)')
+
+            this.emit('ready')
+            this.readyState.on(true)
+          })
+          break
+
+        case 'room-invite':
+          puppet.on('room-invite', async payload => {
+            const roomInvitation = this.RoomInvitation.load(payload.roomInvitationId)
+            this.emit('room-invite', roomInvitation)
+          })
+          break
+
+        case 'room-join':
+          puppet.on('room-join', async payload => {
+            const room = this.Room.load(payload.roomId)
+            await room.sync()
+
+            const inviteeList = payload.inviteeIdList.map(id => this.Contact.load(id))
+            await Promise.all(inviteeList.map(c => c.ready()))
+
+            const inviter = this.Contact.load(payload.inviterId)
+            await inviter.ready()
+            const date = timestampToDate(payload.timestamp)
+
+            this.emit('room-join', room, inviteeList, inviter, date)
+            room.emit('join', inviteeList, inviter, date)
+          })
+          break
+
+        case 'room-leave':
+          puppet.on('room-leave', async payload => {
+            const room = this.Room.load(payload.roomId)
+
+            /**
+             * See: https://github.com/wechaty/wechaty/pull/1833
+             */
+            await room.sync()
+
+            const leaverList = payload.removeeIdList.map(id => this.Contact.load(id))
+            await Promise.all(leaverList.map(c => c.ready()))
+
+            const remover = this.Contact.load(payload.removerId)
+            await remover.ready()
+            const date = timestampToDate(payload.timestamp)
+
+            this.emit('room-leave', room, leaverList, remover, date)
+            room.emit('leave', leaverList, remover, date)
+
+            // issue #254
+            const selfId = this.puppet.selfId()
+            if (selfId && payload.removeeIdList.includes(selfId)) {
+              await this.puppet.dirtyPayload(PayloadType.Room, payload.roomId)
+              await this.puppet.dirtyPayload(PayloadType.RoomMember, payload.roomId)
+            }
+
+          })
+          break
+
+        case 'room-topic':
+          puppet.on('room-topic', async payload => {
+            const room = this.Room.load(payload.roomId)
+            await room.sync()
+
+            const changer = this.Contact.load(payload.changerId)
+            await changer.ready()
+            const date = timestampToDate(payload.timestamp)
+
+            this.emit('room-topic', room, payload.newTopic, payload.oldTopic, changer, date)
+            room.emit('topic', payload.newTopic, payload.oldTopic, changer, date)
+          })
+          break
+
+        case 'scan':
+          puppet.on('scan', async payload => {
+            this.emit('scan', payload.qrcode || '', payload.status, payload.data)
+          })
+          break
+
+        case 'reset':
+          // Do not propagation `reset` event from puppet
+          break
+
+        case 'dirty':
+          /**
+           * https://github.com/wechaty/wechaty-puppet-service/issues/43
+           */
+          puppet.on('dirty', async ({ payloadType, payloadId }) => {
+            switch (payloadType) {
+              case PayloadType.RoomMember:
+              case PayloadType.Contact:
+                await this.Contact.load(payloadId).sync()
+                break
+              case PayloadType.Room:
+                await this.Room.load(payloadId).sync()
+                break
+
+              /**
+               * Huan(202008): noop for the following
+               */
+              case PayloadType.Friendship:
+                // Friendship has no payload
+                break
+              case PayloadType.Message:
+                // Message does not need to dirty (?)
+                break
+
+              case PayloadType.Unknown:
+              default:
+                throw new Error('unknown payload type: ' + payloadType)
+            }
+          })
+          break
+
+        default:
+          /**
+           * Check: The eventName here should have the type `never`
+           */
+          throw new Error('eventName ' + eventName + ' unsupported!')
+
+      }
+    }
+  }
+
+  protected wechatifyUserModules (puppet: Puppet) {
+    log.verbose('Wechaty', 'wechatifyUserModules(%s)', puppet)
+
+    if (this.wechatifiedContactSelf) {
+      throw new Error('can not be initialized twice!')
     }
 
     /**
-     * 2. Plugin Version Range Check
+     * 1. Setup Wechaty User Classes
      */
-    if (!semver.satisfies(
-      this.version(true),
-      puppet.wechatyVersionRange(),
-    )) {
-      throw new Error(`The Puppet Plugin(${puppet.constructor.name}) `
-                    + `requires a version range(${puppet.wechatyVersionRange()}) `
-                    + `that is not satisfying the Wechaty version: ${this.version()}.`)
-    }
-
-    for (const event of Object.keys(WECHATY_EVENT_DICT)) {
-      log.verbose('Wechaty', 'initPuppet() puppet.on(%s) registered', event)
-      /// e as any ??? Maybe this is a bug of TypeScript v2.5.3
-      puppet.on(event as any, (...args: any[]) => {
-        this.emit(event, ...args)
-      })
-    }
-
-    /**
-     * When `this` is the global instance of Wechaty (`Wechaty.instance()`)
-     * so we can keep using `Contact.find()` and `Room.find()`
-     *
-     * This workaround should be removed after v0.18
-     *
-     * See: fix the breaking changes for #518
-     * https://github.com/Chatie/wechaty/issues/518
-     */
-    if (this === Wechaty.globalInstance) {
-      Contact.puppet       = puppet
-      FriendRequest.puppet = puppet
-      Message.puppet       = puppet
-      Room.puppet          = puppet
-
-      //
-      instanceToClass(this, PuppetAccessory).puppet = puppet
-    }
-
-    /**
-     * Clone Classes for this bot and attach the `puppet` to the Class
-     *
-     * Fixme:
-     *   https://stackoverflow.com/questions/36886082/abstract-constructor-type-in-typescript
-     *   https://github.com/Microsoft/TypeScript/issues/5843#issuecomment-290972055
-     *   https://github.com/Microsoft/TypeScript/issues/19197
-     */
-    this.Contact        = cloneClass(puppet.classes.Contact)
-    this.FriendRequest  = cloneClass(puppet.classes.FriendRequest)
-    this.Message        = cloneClass(puppet.classes.Message)
-    this.Room           = cloneClass(puppet.classes.Room)
-
-    this.Contact.puppet       = puppet
-    this.FriendRequest.puppet = puppet
-    this.Message.puppet       = puppet
-    this.Room.puppet          = puppet
+    this.wechatifiedContact        = wechatifyContact(this)
+    this.wechatifiedContactSelf    = wechatifyContactSelf(this)
+    this.wechatifiedFriendship     = wechatifyFriendship(this)
+    this.wechatifiedImage          = wechatifyImage(this)
+    this.wechatifiedMessage        = wechatifyMessage(this)
+    this.wechatifiedMiniProgram    = wechatifyMiniProgram(this)
+    this.wechatifiedRoom           = wechatifyRoom(this)
+    this.wechatifiedRoomInvitation = wechatifyRoomInvitation(this)
+    this.wechatifiedTag            = wechatifyTag(this)
+    this.wechatifiedUrlLink        = wechatifyUrlLink(this)
 
     this.puppet = puppet
   }
@@ -446,46 +646,82 @@ export class Wechaty extends PuppetAccessory implements Sayable {
    * Start the bot, return Promise.
    *
    * @returns {Promise<void>}
+   * @description
+   * When you start the bot, bot will begin to login, need you WeChat scan qrcode to login
+   * > Tips: All the bot operation needs to be triggered after start() is done
    * @example
    * await bot.start()
    * // do other stuff with bot here
    */
-  public async start(): Promise<void> {
-    log.info('Wechaty', 'v%s starting...' , this.version())
-    log.verbose('Wechaty', 'puppet: %s'   , this.options.puppet)
-    log.verbose('Wechaty', 'profile: %s'  , this.options.profile)
-    log.verbose('Wechaty', 'cuid: %s'     , this.cuid)
+  public async start (): Promise<void> {
+    log.verbose('Wechaty', '<%s>(%s) start() v%s is starting...',
+      this.options.puppet || config.systemPuppetName(),
+      this.options.name   || '',
+      this.version(),
+    )
+    log.verbose('Wechaty', 'id: %s', this.id)
 
     if (this.state.on()) {
       log.silly('Wechaty', 'start() on a starting/started instance')
-      await this.state.ready()
+      await this.state.ready('on')
       log.silly('Wechaty', 'start() state.ready() resolved')
       return
+    }
+
+    this.readyState.off(true)
+
+    if (this.lifeTimer) {
+      throw new Error('start() lifeTimer exist')
     }
 
     this.state.on('pending')
 
     try {
-      this.profile.load()
-      this.initPuppet()
+      if (!this.memory) {
+        this.memory = new MemoryCard(this.options.name)
+      }
 
-      // set puppet instance to Wechaty Static variable, for using by Contact/Room/Message/FriendRequest etc.
-      // config.puppetInstance(puppet)
+      try {
+        await this.memory.load()
+      } catch (e) {
+        log.silly('Wechaty', 'start() memory.load() had already loaded')
+      }
 
+      await this.initPuppet()
       await this.puppet.start()
 
+      if (this.options.ioToken) {
+        this.io = new Io({
+          token   : this.options.ioToken,
+          wechaty : this,
+        })
+        await this.io.start()
+      }
+
     } catch (e) {
+      console.error(e)
       log.error('Wechaty', 'start() exception: %s', e && e.message)
       Raven.captureException(e)
-      throw e
+      this.emit('error', e)
+
+      try {
+        await this.stop()
+      } catch (e) {
+        log.error('Wechaty', 'start() stop() exception: %s', e && e.message)
+        Raven.captureException(e)
+        this.emit('error', e)
+      }
+      return
     }
 
     this.on('heartbeat', () => this.memoryCheck())
 
+    this.lifeTimer = setInterval(() => {
+      log.silly('Wechaty', 'start() setInterval() this timer is to keep Wechaty running...')
+    }, 1000 * 60 * 60)
+
     this.state.on(true)
     this.emit('start')
-
-    return
   }
 
   /**
@@ -495,8 +731,20 @@ export class Wechaty extends PuppetAccessory implements Sayable {
    * @example
    * await bot.stop()
    */
-  public async stop(): Promise<void> {
-    log.verbose('Wechaty', 'stop()')
+  public async stop (): Promise<void> {
+    log.verbose('Wechaty', '<%s> stop() v%s is stopping ...',
+      this.options.puppet || config.systemPuppetName(),
+      this.version(),
+    )
+
+    /**
+     * Uninstall Plugins
+     *  no matter the state is `ON` or `OFF`.
+     */
+    while (this.pluginUninstallerList.length > 0) {
+      const uninstaller = this.pluginUninstallerList.pop()
+      if (uninstaller) uninstaller()
+    }
 
     if (this.state.off()) {
       log.silly('Wechaty', 'stop() on an stopping/stopped instance')
@@ -505,38 +753,42 @@ export class Wechaty extends PuppetAccessory implements Sayable {
       return
     }
 
+    this.readyState.off(true)
+
     this.state.off('pending')
 
-    let puppet: Puppet
-    try {
-      puppet = this.puppet
-    } catch (e) {
-      log.warn('Wechaty', 'stop() without this.puppet')
-      return
+    if (this.lifeTimer) {
+      clearInterval(this.lifeTimer)
+      this.lifeTimer = undefined
     }
 
-    // this.puppet = null
-    // config.puppetInstance(null)
-    // this.Contact.puppet       = undefined
-    // this.FriendRequest.puppet = undefined
-    // this.Message.puppet       = undefined
-    // this.Room.puppet          = undefined
+    try {
+      await this.puppet.stop()
+    } catch (e) {
+      log.warn('Wechaty', 'stop() puppet.stop() exception: %s', e.message)
+    }
 
     try {
-      await puppet.stop()
+      if (this.io) {
+        await this.io.stop()
+        this.io = undefined
+      }
+
     } catch (e) {
       log.error('Wechaty', 'stop() exception: %s', e.message)
       Raven.captureException(e)
-      throw e
-    } finally {
-      this.state.off(true)
-      this.emit('stop')
-
-      // MUST use setImmediate at here(the end of this function),
-      // because we need to run the micro task registered by the `emit` method
-      setImmediate(() => puppet.removeAllListeners())
+      this.emit('error', e)
     }
-    return
+
+    this.state.off(true)
+    this.emit('stop')
+  }
+
+  public async ready (): Promise<void> {
+    log.verbose('Wechaty', 'ready()')
+    return this.readyState.ready('on').then(() => {
+      return log.silly('Wechaty', 'ready() this.readyState.ready(on) resolved')
+    })
   }
 
   /**
@@ -546,7 +798,7 @@ export class Wechaty extends PuppetAccessory implements Sayable {
    * @example
    * await bot.logout()
    */
-  public async logout(): Promise<void>  {
+  public async logout (): Promise<void>  {
     log.verbose('Wechaty', 'logout()')
 
     try {
@@ -556,7 +808,6 @@ export class Wechaty extends PuppetAccessory implements Sayable {
       Raven.captureException(e)
       throw e
     }
-    return
   }
 
   /**
@@ -565,74 +816,157 @@ export class Wechaty extends PuppetAccessory implements Sayable {
    * @returns {boolean}
    * @example
    * if (bot.logonoff()) {
-   *   console.log('Bot logined')
+   *   console.log('Bot logged in')
    * } else {
-   *   console.log('Bot not logined')
+   *   console.log('Bot not logged in')
    * }
    */
-  public logonoff(): Boolean {
-    return this.puppet.logonoff()
-  }
-
-  /**
-   * @deprecated
-   */
-  public self(): Contact {
-    log.warn('Wechaty', 'self() DEPRECATED')
-    return this.userSelf()
+  public logonoff (): boolean {
+    try {
+      return this.puppet.logonoff()
+    } catch (e) {
+      // https://github.com/wechaty/wechaty/issues/1878
+      return false
+    }
   }
 
   /**
    * Get current user
    *
-   * @returns {Contact}
+   * @returns {ContactSelf}
    * @example
    * const contact = bot.userSelf()
    * console.log(`Bot is ${contact.name()}`)
    */
-  public userSelf(): Contact {
-    return this.puppet.userSelf()
+  public userSelf (): ContactSelf {
+    const userId = this.puppet.selfId()
+    const user = this.ContactSelf.load(userId)
+    return user
   }
 
-  /**
-   * @private
-   */
-  public async send(message: Message): Promise<void> {
-    try {
-      await this.puppet.send(message)
-    } catch (e) {
-      log.error('Wechaty', 'send() exception: %s', e.message)
-      Raven.captureException(e)
-      throw e
-    }
-  }
+  public async say (text:     string)      : Promise<void>
+  public async say (contact:  Contact)     : Promise<void>
+  public async say (file:     FileBox)     : Promise<void>
+  public async say (mini:     MiniProgram) : Promise<void>
+  public async say (url:      UrlLink)     : Promise<void>
+
+  public async say (...args: never[]): Promise<never>
 
   /**
-   * Send message to filehelper
+   * Send message to userSelf, in other words, bot send message to itself.
+   * > Tips:
+   * This function is depending on the Puppet Implementation, see [puppet-compatible-table](https://github.com/wechaty/wechaty/wiki/Puppet#3-puppet-compatible-table)
    *
-   * @param {string} text
-   * @returns {Promise<boolean>}
+   * @param {(string | Contact | FileBox | UrlLink | MiniProgram)} something
+   * send text, Contact, or file to bot. </br>
+   * You can use {@link https://www.npmjs.com/package/file-box|FileBox} to send file
+   *
+   * @returns {Promise<void>}
+   *
+   * @example
+   * const bot = new Wechaty()
+   * await bot.start()
+   * // after logged in
+   *
+   * // 1. send text to bot itself
+   * await bot.say('hello!')
+   *
+   * // 2. send Contact to bot itself
+   * const contact = await bot.Contact.find()
+   * await bot.say(contact)
+   *
+   * // 3. send Image to bot itself from remote url
+   * import { FileBox }  from 'wechaty'
+   * const fileBox = FileBox.fromUrl('https://wechaty.github.io/wechaty/images/bot-qr-code.png')
+   * await bot.say(fileBox)
+   *
+   * // 4. send Image to bot itself from local file
+   * import { FileBox }  from 'wechaty'
+   * const fileBox = FileBox.fromFile('/tmp/text.jpg')
+   * await bot.say(fileBox)
+   *
+   * // 5. send Link to bot itself
+   * const linkPayload = new UrlLink ({
+   *   description : 'WeChat Bot SDK for Individual Account, Powered by TypeScript, Docker, and Love',
+   *   thumbnailUrl: 'https://avatars0.githubusercontent.com/u/25162437?s=200&v=4',
+   *   title       : 'Welcome to Wechaty',
+   *   url         : 'https://github.com/wechaty/wechaty',
+   * })
+   * await bot.say(linkPayload)
+   *
+   * // 6. send MiniProgram to bot itself
+   * const miniPayload = new MiniProgram ({
+   *   username           : 'gh_xxxxxxx',     //get from mp.weixin.qq.com
+   *   appid              : '',               //optional, get from mp.weixin.qq.com
+   *   title              : '',               //optional
+   *   pagepath           : '',               //optional
+   *   description        : '',               //optional
+   *   thumbnailurl       : '',               //optional
+   * })
+   * await bot.say(miniPayload)
    */
-  public async say(text: string): Promise<void> {
-    log.verbose('Wechaty', 'say(%s)', text)
-    await this.puppet.say(text)
+
+  public async say (
+    something:  string
+              | Contact
+              | FileBox
+              | MiniProgram
+              | UrlLink
+  ): Promise<void> {
+    log.verbose('Wechaty', 'say(%s)', something)
+    // huan: to make TypeScript happy
+    await this.userSelf().say(something as any)
   }
 
   /**
-   * @private
+   * @ignore
    */
-  public static async sleep(millisecond: number): Promise<void> {
+  public static version (gitHash = false): string {
+    if (gitHash && GIT_COMMIT_HASH) {
+      return `#git[${GIT_COMMIT_HASH}]`
+    }
+    return VERSION
+  }
+
+  /**
+   * @ignore
+   * Return version of Wechaty
+   *
+   * @param {boolean} [forceNpm=false]  - If set to true, will only return the version in package.json. </br>
+   *                                      Otherwise will return git commit hash if .git exists.
+   * @returns {string}                  - the version number
+   * @example
+   * console.log(Wechaty.instance().version())       // return '#git[af39df]'
+   * console.log(Wechaty.instance().version(true))   // return '0.7.9'
+   */
+  public version (forceNpm = false): string {
+    return Wechaty.version(forceNpm)
+  }
+
+  /**
+   * @ignore
+   */
+  public static async sleep (millisecond: number): Promise<void> {
     await new Promise(resolve => {
       setTimeout(resolve, millisecond)
     })
   }
 
   /**
+   * @ignore
+   */
+  public async sleep (millisecond: number): Promise<void> {
+    return Wechaty.sleep(millisecond)
+  }
+
+  /**
    * @private
    */
-  public async ding(): Promise<string> {
+  public ding (data?: string): void {
+    log.silly('Wechaty', 'ding(%s)', data || '')
+
     try {
-      return await this.puppet.ding() // should return 'dong'
+      this.puppet.ding(data)
     } catch (e) {
       log.error('Wechaty', 'ding() exception: %s', e.message)
       Raven.captureException(e)
@@ -641,12 +975,13 @@ export class Wechaty extends PuppetAccessory implements Sayable {
   }
 
   /**
-   * @private
+   * @ignore
    */
-  private memoryCheck(minMegabyte = 4): void {
+  private memoryCheck (minMegabyte = 4): void {
     const freeMegabyte = Math.floor(os.freemem() / 1024 / 1024)
     log.silly('Wechaty', 'memoryCheck() free: %d MB, require: %d MB',
-                          freeMegabyte, minMegabyte)
+      freeMegabyte, minMegabyte,
+    )
 
     if (freeMegabyte < minMegabyte) {
       const e = new Error(`memory not enough: free ${freeMegabyte} < require ${minMegabyte} MB`)
@@ -656,15 +991,36 @@ export class Wechaty extends PuppetAccessory implements Sayable {
   }
 
   /**
-   * @private
+   * @ignore
    */
-  public async reset(reason?: string): Promise<void> {
-    log.verbose('Wechaty', 'reset() because %s', reason)
+  public async reset (reason?: string): Promise<void> {
+    log.verbose('Wechaty', 'reset() because %s', reason || 'no reason')
     await this.puppet.stop()
     await this.puppet.start()
-    return
+  }
+
+  public unref (): void {
+    log.verbose('Wechaty', 'unref()')
+
+    if (this.lifeTimer) {
+      this.lifeTimer.unref()
+    }
+
+    this.puppet.unref()
   }
 
 }
 
-export default Wechaty
+/**
+ * Huan(202008): we will bind the wechaty puppet with user modules (Contact, Room, etc) together inside the start() method
+ */
+function guardWechatify<T extends Function> (userModule?: T): T {
+  if (!userModule) {
+    throw new Error('Wechaty user module (for example, wechaty.Room) can not be used before wechaty.start()!')
+  }
+  return userModule
+}
+
+export {
+  Wechaty,
+}
